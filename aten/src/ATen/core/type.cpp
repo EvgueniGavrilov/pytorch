@@ -23,6 +23,17 @@ std::ostream& operator<<(std::ostream & out, const Type & t) {
       }
     }
     out << ")";
+  } else if (auto value = t.cast<ProfiledTensorType>()) {
+    out << "Tensor(dtype = ";
+    if  (value->scalarType().has_value())
+    {
+        out << *value->scalarType();
+    }
+    else
+    {
+      out << " dynamic";
+    }
+    out << " , shape = " << value->sizes();
   } else if (auto value = t.cast<DimensionedTensorType>()) {
     out << toString(value->scalarType()) << "(";
     for (int64_t i = 0; i < value->dim(); ++i) {
@@ -59,8 +70,8 @@ TensorTypePtr TensorType::get() {
   static auto value = TensorType::create();
   return value;
 }
-UndefinedTensorTypePtr UndefinedTensorType::get() {
-  static auto value = UndefinedTensorType::create();
+AutogradZeroTensorTypePtr AutogradZeroTensorType::get() {
+  static auto value = AutogradZeroTensorType::create();
   return value;
 }
 NumberTypePtr NumberType::get() {
@@ -176,6 +187,28 @@ TypePtr attemptToRecoverType(const IValue& ivalue) {
 
 // Checks if input_ivalue is a subvalue of type.
 bool isSubvalueOf(const IValue& ivalue, TypePtr type) {
+  if (auto optional = type->cast<OptionalType>()) {
+    // Unwrap the optional if the ivalue is not none
+    if (ivalue.isNone()) {
+      return true;
+    } else {
+      return isSubvalueOf(ivalue, optional->getElementType());
+    }
+  }
+
+  if (ivalue.isTuple()) {
+    const auto& ivalue_elem = ivalue.toTuple()->elements();
+    auto tuple_type = type->cast<TupleType>();
+    if (!tuple_type || tuple_type->elements().size() != ivalue_elem.size()) {
+      return false;
+    }
+    auto type_elem = tuple_type->elements();
+    bool is_subvalue = true;
+    for (size_t i = 0; i < type_elem.size() && is_subvalue; ++i) {
+      is_subvalue = isSubvalueOf(ivalue_elem[i], type_elem[i]);
+    }
+    return is_subvalue;
+  }
   if (ivalue.isGenericList()) {
     auto list_type = type->cast<ListType>();
     if (!list_type) {
@@ -199,13 +232,20 @@ bool isSubvalueOf(const IValue& ivalue, TypePtr type) {
   return incompleteInferTypeFrom(ivalue)->isSubtypeOf(type);
 }
 
-
-c10::optional<TypePtr> unifyTypes(const TypePtr& t1, const TypePtr& t2) {
-  //cases that t1 == t2, or t1 is a type refinement of t2 and vice versa
+c10::optional<TypePtr> tryEitherIsTheSuperType(const TypePtr& t1, const TypePtr& t2) {
   if (t1->isSubtypeOf(t2)) {
     return t2;
   } else if (t2->isSubtypeOf(t1)) {
     return t1;
+  } else {
+    return c10::nullopt;
+  }
+}
+
+c10::optional<TypePtr> unifyTypes(const TypePtr& t1, const TypePtr& t2) {
+  //cases that t1 == t2, or t1 is a type refinement of t2 and vice versa
+  if (auto maybe_supertype = tryEitherIsTheSuperType(t1, t2)) {
+    return *maybe_supertype;
   }
 
   // NB: we do not return NumberType because there is not currently enough
@@ -224,12 +264,14 @@ c10::optional<TypePtr> unifyTypes(const TypePtr& t1, const TypePtr& t2) {
 
   //types which contain other types
   if (t1->cast<ListType>() && t2->cast<ListType>()) {
-    auto unified_type = unifyTypes(t1->cast<ListType>()->getElementType(), t2->cast<ListType>()->getElementType());
-    if (unified_type) {
-      return static_cast<TypePtr>(ListType::create(*unified_type));
-    } else {
-      return c10::nullopt;
-    }
+    // because we have runtime specializations of lists, e.g. int[] = std::vector<int64_t>
+    // int?[] = std::vector<IValue>  we don't allow type coercion,
+    // since t1 & t2 may have different runtime representations.
+
+    // allow Lists of different tensor types
+    auto unshaped_t1 = unshapedType(t1);
+    auto unshaped_t2 = unshapedType(t2);
+    return tryEitherIsTheSuperType(unshaped_t1, unshaped_t2);
   } else if(t1->cast<TupleType>() && t2->cast<TupleType>()) {
     auto tuple1 = t1->cast<TupleType>();
     auto tuple2 = t2->cast<TupleType>();
@@ -245,6 +287,18 @@ c10::optional<TypePtr> unifyTypes(const TypePtr& t1, const TypePtr& t2) {
       }
     }
     return static_cast<TypePtr>(TupleType::create(elements));
+  } else if (t1->cast<DictType>() && t2->cast<DictType>()) {
+    auto dict1 = t1->cast<DictType>();
+    auto dict2 = t2->cast<DictType>();
+
+    auto unified_key = unifyTypes(dict1->getKeyType(), dict2->getKeyType());
+    auto unshaped_value1 = unshapedType(dict1->getValueType());
+    auto unshaped_value2 = unshapedType(dict2->getValueType());
+    auto unified_value = tryEitherIsTheSuperType(unshaped_value1, unshaped_value2);
+    if (!unified_key || !unified_value) {
+      return c10::nullopt;
+    }
+    return DictType::create(*unified_key, *unified_value);
   }
 
   return c10::nullopt;
@@ -414,5 +468,122 @@ bool Type::isSubtypeOf(const TypePtr rhs) const {
   }
   return *this == *rhs;
 }
+
+namespace {
+class ClassTypeRegistry {
+ public:
+  void registerType(QualifiedName name, ClassTypePtr type) {
+    std::lock_guard<std::mutex> g(mutex_);
+    // TODO: new type registrations will override the old ones. Is this safe?
+    reg_[std::move(name)] = type;
+  }
+
+  ClassTypePtr getType(const QualifiedName& name) {
+    std::lock_guard<std::mutex> g(mutex_);
+    if (reg_.count(name)) {
+      return reg_.at(name);
+    }
+    return nullptr;
+  }
+
+  void clear() {
+    std::lock_guard<std::mutex> g(mutex_);
+    reg_.clear();
+  }
+
+ private:
+  std::mutex mutex_;
+  std::unordered_map<QualifiedName, ClassTypePtr> reg_;
+};
+
+ClassTypeRegistry& getRegistry() {
+  static ClassTypeRegistry r;
+  return r;
+}
+} // namespace
+
+ClassTypePtr ClassType::create(
+    QualifiedName qualifiedName,
+    std::shared_ptr<CompilationUnit> cu) {
+  auto ptr =
+      ClassTypePtr(new ClassType(qualifiedName, std::move(cu)));
+  getRegistry().registerType(std::move(qualifiedName), ptr);
+  return ptr;
+}
+
+ClassTypePtr ClassType::createModuleType(std::shared_ptr<CompilationUnit> cu) {
+  return ClassTypePtr(new ClassType(
+      QualifiedName(QualifiedName("__torch__"), "$Module"), std::move(cu)));
+}
+
+ClassTypePtr ClassType::refine(at::ArrayRef<TypePtr> refined_slots) const {
+  auto ptr = ClassTypePtr(new ClassType(name_, compilation_unit_));
+  AT_ASSERT(numAttributes() == refined_slots.size());
+  for(size_t i = 0; i < attributeNames_.size(); ++i) {
+    AT_ASSERT(refined_slots[i]->isSubtypeOf(attributeTypes_[i]));
+    ptr->addAttribute(attributeNames_[i], refined_slots[i]);
+  }
+  return ptr;
+}
+
+ClassTypePtr ClassType::get(const QualifiedName& name) {
+  return getRegistry().getType(name);
+}
+
+void ClassType::clearRegistry() {
+  getRegistry().clear();
+}
+
+std::string ProfiledTensorType::str() const {
+  return "Tensor";
+}
+
+VaryingShape VaryingShape::merge(const VaryingShape& other) const
+{
+  if (size_ != other.size_) {
+    return VaryingShape(c10::optional<size_t>{});
+  }
+
+  VaryingShape vs(c10::optional<size_t>(dims_.size()));
+  for (size_t i = 0; i < dims_.size(); i++)
+  {
+    vs.dims_[i] = merge_primitive(dims_[i], other.dims_[i]);
+  }
+
+  return vs;
+}
+
+std::ostream& operator<<(std::ostream & out, const VaryingShape & vs) {
+
+    out << "(";
+    if (!vs.size()) {
+      out << "*)";
+      return out;
+    }
+
+    for (size_t i = 0; i < vs.size(); i++)
+    {
+      if (i > 0) {
+        out << ", ";
+      }
+      if (vs[i].has_value())
+      {
+        out << vs[i].value();
+      }
+      else
+      {
+        out << "*";
+      }
+    }
+    out << ")";
+    return out;
+}
+
+ClassType::ClassType(
+    QualifiedName name,
+    std::shared_ptr<CompilationUnit> cu)
+    : Type(TypeKind::ClassType),
+      name_(std::move(name)),
+      compilation_unit_(std::move(cu)) {}
 
 } // namespace c10

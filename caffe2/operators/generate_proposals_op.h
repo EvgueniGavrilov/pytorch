@@ -3,10 +3,11 @@
 
 #include "caffe2/core/context.h"
 #include "caffe2/core/operator.h"
+#include "caffe2/core/c10_operator.h"
 #include "caffe2/utils/eigen_utils.h"
 #include "caffe2/utils/math.h"
 
-C10_DECLARE_CAFFE2_OPERATOR(GenerateProposalsOp);
+C10_DECLARE_CAFFE2_OPERATOR(GenerateProposals);
 
 namespace caffe2 {
 
@@ -91,9 +92,6 @@ class GenerateProposalsOp final : public Operator<Context> {
         rpn_nms_thresh_(
             this->template GetSingleArgument<float>("nms_thresh", 0.7f)),
         rpn_min_size_(this->template GetSingleArgument<float>("min_size", 16)),
-        correct_transform_coords_(this->template GetSingleArgument<bool>(
-            "correct_transform_coords",
-            false)),
         angle_bound_on_(
             this->template GetSingleArgument<bool>("angle_bound_on", true)),
         angle_bound_lo_(
@@ -135,10 +133,6 @@ class GenerateProposalsOp final : public Operator<Context> {
   float rpn_nms_thresh_{0.7};
   // RPN_MIN_SIZE
   float rpn_min_size_{16};
-  // Correct bounding box transform coordates, see bbox_transform() in boxes.py
-  // Set to true to match the detectron code, set to false for backward
-  // compatibility
-  bool correct_transform_coords_{false};
   // If set, for rotated boxes in RRPN, output angles are normalized to be
   // within [angle_bound_lo, angle_bound_hi].
   bool angle_bound_on_{true};

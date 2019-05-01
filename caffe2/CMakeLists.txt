@@ -4,7 +4,7 @@ include(../cmake/Codegen.cmake)
 # ---[ Declare source file lists
 
 # ---[ ATen build
-if (NOT BUILD_ATEN_MOBILE)
+if (NOT INTERN_BUILD_MOBILE)
   set(__caffe2_CMAKE_POSITION_INDEPENDENT_CODE ${CMAKE_POSITION_INDEPENDENT_CODE})
   set(CMAKE_POSITION_INDEPENDENT_CODE ON)
   set(AT_LINK_STYLE INTERFACE)
@@ -69,8 +69,8 @@ if(NOT BUILD_ATEN_ONLY)
   add_subdirectory(core)
   add_subdirectory(utils)
   add_subdirectory(predictor)
+  add_subdirectory(predictor/emulator)
   add_subdirectory(core/nomnigraph)
-  add_subdirectory(core/nomscheduler)
   add_subdirectory(serialize)
   if (USE_NVRTC)
     add_subdirectory(cuda_rtc)
@@ -206,6 +206,9 @@ if(NOT BUILD_ATEN_ONLY)
   #     nothing changes. If one has a dependent library that uses protobuf, then one needs to
   #     have the right protobuf version as well as linking to libprotobuf.a.
   target_link_libraries(caffe2_protos PUBLIC protobuf::libprotobuf)
+  if (NOT BUILD_SHARED_LIBS)
+    INSTALL(TARGETS caffe2_protos ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}")
+  endif()
 endif()
 
 # Compile exposed libraries.
@@ -402,7 +405,7 @@ if(USE_ROCM)
   target_compile_options(caffe2_hip PRIVATE ${HIP_CXX_FLAGS})
   target_link_libraries(caffe2_hip PUBLIC caffe2)
   target_link_libraries(caffe2_hip PUBLIC c10_hip)
-  if(NOT BUILD_ATEN_MOBILE)
+  if(NOT INTERN_BUILD_MOBILE)
     # TODO: Cut this over to ATEN_HIP_FILES_GEN_LIB.  At the moment, we
     # only generate CUDA files
     # NB: This dependency must be PRIVATE, because we don't install
