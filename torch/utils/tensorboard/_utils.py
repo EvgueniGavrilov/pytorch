@@ -37,6 +37,12 @@ def figure_to_image(figures, close=True):
 
 
 def _prepare_video(V):
+    """
+    Converts a 5D tensor [batchsize, time(frame), channel(color), height, width]
+    into 4D tensor with dimension [time(frame), new_width, new_height, channel].
+    A batch of images are spreaded to a grid, which forms a frame.
+    e.g. Video with batchsize 16 will have a 4x4 grid.
+    """
     b, t, c, h, w = V.shape
 
     if V.dtype == np.uint8:
@@ -73,7 +79,7 @@ def make_grid(I, ncols=8):
     W = I.shape[3]
     ncols = min(nimg, ncols)
     nrows = int(np.ceil(float(nimg) / ncols))
-    canvas = np.zeros((3, H * nrows, W * ncols))
+    canvas = np.zeros((3, H * nrows, W * ncols), dtype=I.dtype)
     i = 0
     for y in range(nrows):
         for x in range(ncols):

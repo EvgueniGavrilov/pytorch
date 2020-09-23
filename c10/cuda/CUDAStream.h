@@ -68,7 +68,7 @@ public:
   /// Construct a CUDAStream from a Stream.  This construction is checked,
   /// and will raise an error if the Stream is not, in fact, a CUDA stream.
   explicit CUDAStream(Stream stream) : stream_(stream) {
-    AT_CHECK(stream_.device_type() == DeviceType::CUDA);
+    TORCH_CHECK(stream_.device_type() == DeviceType::CUDA);
   }
 
   /// Construct a CUDAStream from a Stream with no error checking.
@@ -155,10 +155,16 @@ public:
 
   static std::tuple<int, int> priority_range() {
     #ifndef __HIP_PLATFORM_HCC__
+      // Note: this returns the range of priority **supported by PyTorch**, not
+      // the range of priority **supported by CUDA**. The former is a subset of
+      // the latter. Curently PyTorch only supports 0 and -1, which are "low" and
+      // "high" priority.
       int least_priority, greatest_priority;
       C10_CUDA_CHECK(
         cudaDeviceGetStreamPriorityRange(&least_priority, &greatest_priority));
-      return std::make_tuple(least_priority, greatest_priority);
+      TORCH_INTERNAL_ASSERT(least_priority >= 0, "Unexpected CUDA stream priority range");
+      TORCH_INTERNAL_ASSERT(greatest_priority <= -1, "Unexpected CUDA stream priority range");
+      return std::make_tuple(0, -1);
     #else
       AT_ERROR("cuDeviceGetStreamPriorityRange with HIP is not supported");
     #endif

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <ATen/native/DispatchStub.h>
+#include <ATen/native/TensorIterator.h>
 #include <c10/core/TensorOptions.h>
 
 namespace at { namespace native {
@@ -49,10 +51,10 @@ inline int64_t get_tril_size(int64_t row, int64_t col, int64_t offset) {
 
 inline void check_args(
     int64_t row, int64_t col, const TensorOptions& options) {
-  AT_CHECK(row >= 0, "row must be non-negative, got", row);
-  AT_CHECK(col >= 0, "col must be non-negative, got", col);
+  TORCH_CHECK(row >= 0, "row must be non-negative, got", row);
+  TORCH_CHECK(col >= 0, "col must be non-negative, got", col);
   if (options.has_layout()) {
-    AT_CHECK(
+    TORCH_CHECK(
       options.layout() == at::kStrided,
       "only support layout=torch.strided, got",
       options.layout())
@@ -61,8 +63,36 @@ inline void check_args(
 
 inline void check_size_nonnegative(IntArrayRef size) {
   for (auto x: size) {
-    AT_CHECK(x >= 0, "Trying to create tensor with negative dimension ", x, ": ", size);
+    TORCH_CHECK(x >= 0, "Trying to create tensor with negative dimension ", x, ": ", size);
   }
 }
+
+inline void check_supported_max_int_with_precision(int64_t n, const Tensor& tensor) {
+  TORCH_CHECK(at::scalar_tensor(n, tensor.options()).defined(),
+              "n is too large for result tensor type: '", tensor.toString(), "'");
+
+  // Ensure sufficient precision for floating point representation.
+  switch (tensor.scalar_type()) {
+    case at::ScalarType::Half:
+      TORCH_CHECK(n <= (int64_t(1) << 11) + 1, "n cannot be greater than 2049 for Half type.");
+      break;
+    case at::ScalarType::Float:
+      TORCH_CHECK(n <= (int64_t(1) << 24) + 1, "n cannot be greater than 2^24+1 for Float type.");
+      break;
+    case at::ScalarType::Double:  // Unlikely to happen, but doesn't hurt to check
+      TORCH_CHECK(n <= (int64_t(1) << 53) + 1, "n cannot be greater than 2^53+1 for Double type.");
+      break;
+    default:
+      break;
+  }
+}
+
+using binary_fn = void (*)(TensorIterator&);
+
+DECLARE_DISPATCH(binary_fn, complex_stub);
+DECLARE_DISPATCH(binary_fn, polar_stub);
+
+DECLARE_DISPATCH(void(*)(TensorIterator&, const int64_t, const double), kaiser_window_stub);
+
 } // namespace native
 } // namespace at

@@ -1,8 +1,3 @@
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-from __future__ import unicode_literals
-
 from torch.autograd import Variable
 from onnx import numpy_helper
 
@@ -14,7 +9,7 @@ import torch
 import traceback
 
 import test_onnx_common
-from common_nn import module_tests
+from torch.testing._internal.common_nn import module_tests
 from test_nn import new_module_tests
 
 

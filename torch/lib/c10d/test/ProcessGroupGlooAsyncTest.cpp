@@ -1,12 +1,11 @@
-#include <gloo/transport/tcp/device.h>
-
-#include <c10/cuda/CUDAGuard.h>
 #include <ATen/cuda/CUDAMultiStreamGuard.h>
+#include <c10/cuda/CUDAGuard.h>
 
 #include <c10d/FileStore.hpp>
 #include <c10d/ProcessGroupGloo.hpp>
 #include <c10d/test/CUDATest.hpp>
 #include <c10d/test/TestUtils.hpp>
+#include <gtest/gtest.h>
 
 using namespace c10d::test;
 
@@ -51,8 +50,8 @@ class AsyncTest {
     // Use tiny timeout to make this test run fast
     ::c10d::ProcessGroupGloo::Options options;
     options.timeout = std::chrono::milliseconds(50);
-    ::gloo::transport::tcp::attr attr;
-    options.devices.push_back(::gloo::transport::tcp::CreateDevice(attr));
+    options.devices.push_back(
+        ::c10d::ProcessGroupGloo::createDeviceForHostname("127.0.0.1"));
 
     pg_ = std::unique_ptr<::c10d::ProcessGroupGloo>(
         new ::c10d::ProcessGroupGloo(store, rank, size, options));
@@ -99,19 +98,24 @@ class AsyncInputIsOutputTest : public AsyncTest {
     work->wait();
   }
 
-  std::vector<at::Tensor> getTensors() {
-    std::vector<at::Tensor> outputs(numTensors_);
+  std::vector<at::Tensor> getCpuTensors(const std::vector<at::Tensor>& gpu_tensors) {
+    std::vector<at::Tensor> outputs(gpu_tensors.size());
 
     // For the duration of this function, make THC use our streams
     at::cuda::CUDAMultiStreamGuard guard(streams_);
 
     // Copy inputs to outputs
-    for (auto i = 0; i < numTensors_; i++) {
-      outputs[i] = inputs_[i].cpu();
+    for (unsigned i = 0; i < gpu_tensors.size(); i++) {
+      outputs[i] = gpu_tensors[i].cpu();
     }
 
     return outputs;
   }
+
+  std::vector<at::Tensor> getTensors() {
+    return getCpuTensors(inputs_);
+  }
+
 
  protected:
   const int numTensors_;
@@ -178,8 +182,8 @@ class AsyncBroadcastTest : public AsyncInputIsOutputTest {
 
 void runAsyncAllreduceTest(
     const std::string& path,
-    size_t numProcesses,
-    size_t numTensors) {
+    size_t numProcesses = 4,
+    size_t numTensors = 2) {
   auto tests = initialize<AsyncAllreduceTest>(path, numProcesses, numTensors);
   std::vector<std::shared_ptr<c10d::ProcessGroup::Work>> work(numProcesses);
   for (size_t i = 0; i < numProcesses; i++) {
@@ -196,13 +200,21 @@ void runAsyncAllreduceTest(
     const auto size = numProcesses * numTensors;
     const auto expected = (size * (size - 1)) / 2;
     auto tensors = tests[i].getTensors();
+    auto results = tests[i].getCpuTensors(work[i]->result());
+    EXPECT_EQ(tensors.size(), results.size());
+
     for (size_t j = 0; j < tensors.size(); j++) {
       auto& tensor = tensors[j];
-      auto data = tensor.data<float>();
+      auto data = tensor.data_ptr<float>();
+
+      auto& result_tensor = results[j];
+      auto result_data = result_tensor.data_ptr<float>();
+
+      EXPECT_EQ(tensor.numel(), result_tensor.numel());
+
       for (auto k = 0; k < tensor.numel(); k++) {
-        if (data[k] != expected) {
-          throw std::runtime_error("BOOM!");
-        }
+        EXPECT_EQ(data[k], expected);
+        EXPECT_EQ(result_data[k], expected);
       }
     }
   }
@@ -210,8 +222,8 @@ void runAsyncAllreduceTest(
 
 void runAsyncBroadcastTest(
     const std::string& path,
-    size_t numProcesses,
-    size_t numTensors) {
+    size_t numProcesses = 4,
+    size_t numTensors = 1) {
   auto tests = initialize<AsyncBroadcastTest>(path, numProcesses, numTensors);
 
   // Try every permutation of root rank and root tensor
@@ -233,11 +245,9 @@ void runAsyncBroadcastTest(
         auto tensors = tests[i].getTensors();
         for (size_t j = 0; j < tensors.size(); j++) {
           auto& tensor = tensors[j];
-          auto data = tensor.data<float>();
+          auto data = tensor.data_ptr<float>();
           for (auto k = 0; k < tensor.numel(); k++) {
-            if (data[k] != expected) {
-              throw std::runtime_error("BOOM!");
-            }
+            EXPECT_EQ(data[k], expected);
           }
         }
       }
@@ -245,15 +255,22 @@ void runAsyncBroadcastTest(
   }
 }
 
-int main(int argc, char** argv) {
-  {
-    TemporaryFile file;
-    runAsyncAllreduceTest(file.path, 4, 2);
+#ifdef USE_CUDA
+TEST(ProcessGroupGlooAsyncTest, testAsyncAllreduce) {
+  if (!at::cuda::is_available()) {
+    LOG(INFO) << "CUDA not available, skipping testAsyncAllreduce";
+    return;
   }
-
-  {
-    TemporaryFile file;
-    runAsyncBroadcastTest(file.path, 4, 1);
-  }
-  std::cout << "Test successful" << std::endl;
+  TemporaryFile file;
+  runAsyncAllreduceTest(file.path);
 }
+
+TEST(ProcessGroupGlooAsyncTest, testAsyncBroadcast) {
+  if (!at::cuda::is_available()) {
+    LOG(INFO) << "CUDA not available, skipping testAsyncBroadcast";
+    return;
+  }
+  TemporaryFile file;
+  runAsyncBroadcastTest(file.path);
+}
+#endif

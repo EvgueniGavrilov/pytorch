@@ -1,15 +1,9 @@
 """
 This module converts objects into numpy array.
 """
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import numpy as np
 import torch
 import six
-
-from caffe2.python import workspace
 
 
 def make_np(x):
@@ -40,5 +34,6 @@ def _prepare_pytorch(x):
 
 
 def _prepare_caffe2(x):
+    from caffe2.python import workspace
     x = workspace.FetchBlob(x)
     return x

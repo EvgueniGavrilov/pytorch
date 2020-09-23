@@ -3,8 +3,11 @@
 #include <c10/util/Exception.h>
 #include <torch/csrc/autograd/function.h>
 #include <torch/csrc/autograd/symbolic.h>
+#include <torch/csrc/jit/ir/constants.h>
+#include <torch/csrc/jit/jit_log.h>
 #include <torch/csrc/jit/passes/dead_code_elimination.h>
-#include <torch/csrc/jit/python_ir.h>
+#include <torch/csrc/jit/passes/onnx/shape_type_inference.h>
+#include <torch/csrc/jit/python/python_ir.h>
 #include <torch/csrc/utils/pybind.h>
 #include <sstream>
 #include <unordered_map>
@@ -35,7 +38,7 @@ void removePrintOps(Block* block) {
   }
 }
 
-void removePrintOps(std::shared_ptr<Graph>& graph) {
+void RemovePrintOps(std::shared_ptr<Graph>& graph) {
   removePrintOps(graph->block());
 }
 
@@ -54,9 +57,12 @@ void checkONNXCompatibility(const c10::FunctionSchema& schema) {
       AT_ASSERT(type->kind() != TypeKind::OptionalType);
     }
     if (type->kind() == TypeKind::ListType) {
-      const auto& elem_type = reinterpret_cast<ListType*>(type.get())->getElementType();
-      if (elem_type->isSubclass(TypeKind::TensorType)) {
-        AT_ASSERTM(!has_tensor_list, "ONNX export supports at most one TensorList as input.");
+      const auto& elem_type =
+          reinterpret_cast<ListType*>(type.get())->getElementType();
+      if (elem_type->isSubtypeOf(TensorType::get())) {
+        AT_ASSERTM(
+            !has_tensor_list,
+            "ONNX export supports at most one TensorList as input.");
         has_tensor_list = true;
       }
     }
@@ -92,62 +98,64 @@ void preprocessCaffe2Ops(Block* block) {
             AT_ASSERT(type->kind() != TypeKind::OptionalType);
           }
         }
-        if (type->isSubclass(TypeKind::TensorType)) {
+        if (type->isSubtypeOf(TensorType::get())) {
           it->addInput(origin_input);
-        } else if (type->kind() == TypeKind::BoolType || type->kind() == TypeKind::FloatType || type->kind() == TypeKind::IntType) {
+        } else if (
+            type->kind() == TypeKind::BoolType ||
+            type->kind() == TypeKind::IntType) {
           const auto* constant_node = origin_input->node();
           AT_ASSERT(constant_node->kind() == prim::Constant);
-          const auto& tensor = constant_node->t(attr::value);
-          AT_ASSERT(tensor.numel() == 1);
-          if (type->kind() == TypeKind::IntType || type->kind() == TypeKind::BoolType) {
-            it->i_(Symbol::attr(arg.name()), tensor.item().to<int64_t>());
-          } else if (type->kind() == TypeKind::FloatType) {
-            it->f_(Symbol::attr(arg.name()), tensor.item().to<float>());
-          } else {
-            // TODO handle the StringType, no c10 op accept String as argument yet
-            throw std::runtime_error("Unhandled scalar arg: " + arg.name() +
-                ", type: " + c10::typeKindToString(type->kind()));
-          }
+          it->i_(Symbol::attr(arg.name()), constant_node->i(attr::value));
+        } else if (type->kind() == TypeKind::FloatType) {
+          const auto* constant_node = origin_input->node();
+          AT_ASSERT(constant_node->kind() == prim::Constant);
+          it->f_(Symbol::attr(arg.name()), constant_node->f(attr::value));
         } else if (type->kind() == TypeKind::StringType) {
           const auto* constant_node = origin_input->node();
           AT_ASSERT(constant_node->kind() == prim::Constant);
           it->s_(Symbol::attr(arg.name()), constant_node->s(attr::value));
         } else if (type->kind() == TypeKind::ListType) {
           const auto& list_node = origin_input->node();
-          AT_ASSERT(list_node->kind() == prim::ListConstruct);
-          const auto& elem_type = reinterpret_cast<ListType*>(type.get())->getElementType();
-          if (elem_type->isSubclass(TypeKind::TensorType)) {
+          const auto& elem_type = type->cast<ListType>()->getElementType();
+          AT_ASSERT(
+              list_node->kind() == prim::ListConstruct ||
+              list_node->kind() == prim::Constant);
+          if (elem_type->isSubtypeOf(TensorType::get())) {
+            AT_ASSERT(list_node->kind(), prim::ListConstruct);
             const auto& tensor_list = origin_input->node()->inputs();
             for (const auto& t : tensor_list) {
               it->addInput(t);
             }
-          } else if (elem_type->kind() == TypeKind::IntType || elem_type->kind() == TypeKind::BoolType) {
-            // TODO support list of ints and bools, needs c10 op for testing
-            throw std::runtime_error("List[int] and List[bool] are not supported yet.");
           } else if (elem_type->kind() == TypeKind::FloatType) {
             std::vector<double> values;
-            for (const auto* elem_input : list_node->inputs()) {
-              const auto* constant_node = elem_input->node();
-              AT_ASSERT(constant_node->kind() == prim::Constant);
-              const auto& tensor = constant_node->t(attr::value);
-              AT_ASSERT(tensor.numel() == 1);
-              values.push_back(tensor.item().to<double>());
+            if (list_node->kind() == prim::ListConstruct) {
+              for (const auto* elem_input : list_node->inputs()) {
+                const auto* constant_node = elem_input->node();
+                AT_ASSERT(constant_node->kind() == prim::Constant);
+                values.push_back(constant_node->f(attr::value));
+              }
+            } else { // is a constant list
+              values = list_node->fs(attr::value);
             }
             it->fs_(Symbol::attr(arg.name()), values);
           } else {
-            throw std::runtime_error("Unhandled scalar arg: " + arg.name() +
-                ", type: " + c10::typeKindToString(elem_type->kind())); }
+            throw std::runtime_error(
+                "Unhandled scalar arg: " + arg.name() +
+                ", type: " + c10::typeKindToString(elem_type->kind()));
+          }
         } else {
-          throw std::runtime_error("Unsupported input type of arg " +
-              arg.name() + " in Caffe2 operator: " +
-              c10::typeKindToString(type->kind())); }
+          throw std::runtime_error(
+              "Unsupported input type of arg " + arg.name() +
+              " in Caffe2 operator: " + c10::typeKindToString(type->kind()));
+        }
       }
     }
   }
-  EliminateDeadCode(block);
+  EliminateDeadCode(
+      block, true, DCESideEffectPolicy::ALLOW_DELETING_NODES_WITH_SIDE_EFFECTS);
 }
 
-void preprocessCaffe2Ops(std::shared_ptr<Graph>& graph) {
+void PreprocessCaffe2Ops(std::shared_ptr<Graph>& graph) {
   preprocessCaffe2Ops(graph->block());
 }
 
@@ -157,8 +165,6 @@ std::shared_ptr<Graph> ToONNX(
     ::torch::onnx::OperatorExportTypes operator_export_type) {
   auto new_graph = std::make_shared<Graph>(graph->current_scope());
   std::unordered_map<Value*, Value*> env;
-  removePrintOps(graph);
-  preprocessCaffe2Ops(graph);
   BlockToONNX(graph->block(), new_graph->block(), operator_export_type, env);
   return new_graph;
 }
@@ -171,21 +177,27 @@ void BlockToONNX(
   torch::autograd::SymbolicContext ctx{};
   ctx.block = new_block;
   py::object onnx = py::module::import("torch.onnx");
-  py::object onnx_symbolic = py::module::import("torch.onnx.symbolic");
+  py::object onnx_symbolic = py::module::import("torch.onnx.symbolic_helper");
+  py::object onnx_registry = py::module::import("torch.onnx.symbolic_registry");
 
   // Returns a node that n maps to in the new graph
   auto envFn = [&env](Value* n) -> Value* {
     auto it = env.find(n);
-    AT_CHECK(it != env.end(), "Dangling node reference");
-    AT_CHECK(it->second, "Unused node was subsequently used");
+    TORCH_CHECK(it != env.end(), "Dangling node reference");
+    TORCH_CHECK(it->second, "Unused node was subsequently used");
     return it->second;
   };
+
+  GRAPH_DEBUG(
+      "BlockToONNX: graph of old block: ",
+      old_block->owningGraph()->toString());
 
   // Initialize context and environment
   for (auto input : old_block->inputs()) {
     auto n = ctx.block->addInput()->copyMetadata(input);
     env[input] = n;
   }
+
   // Put the new outputs in our environment map, and copy the type from the
   // input graph if they were not set by the symbolic. This is called only
   // with results of symbolic call (not for nodes that are just cloned).
@@ -208,10 +220,14 @@ void BlockToONNX(
         // Allow symbolic() to skip specifying the type of the return node.
         // Unfortunately, they are on the hook for all internal nodes
         // (though in practice, the types are not computed.)
-        outputs[i]->setType(old->type());
+        //
+        // If onnx shape inference is turned on, the new outputs will have
+        // types inferred, and they will be merged with the old types.
+        outputs[i]->setType(MergeInferredType(old->type(), outputs[i]->type()));
+
         // Copy over source location and scope information to all nodes
         // created by the symbolic
-        outputs[i]->node()->setSourceLocation(node->getSourceLocation());
+        outputs[i]->node()->setSourceRange(node->sourceRange());
         outputs[i]->node()->setScope(node->scope());
         env[old] = outputs[i];
       } else {
@@ -286,6 +302,7 @@ void BlockToONNX(
     // TODO: Assert it's an ATen identifier???
     // (Sometimes it's not...)
     processSymbolicOutput(n->kind().toUnqualString(), n, raw_output);
+    GRAPH_DUMP("after process output:", ctx.block->owningGraph());
   };
 
   auto callPySymbolicMethod = [&](ConcretePythonOp* op) {
@@ -295,7 +312,6 @@ void BlockToONNX(
     if (func) {
       pyobj = func->get();
     }
-
     if (!py::hasattr(pyobj, "symbolic")) {
       cloneNode(op);
       return;
@@ -312,13 +328,13 @@ void BlockToONNX(
     for (auto arg_type : op->cconv) {
       py::object obj;
       if (arg_type == 'c') {
-        AT_CHECK(
+        TORCH_CHECK(
             scalar_it != op->scalar_args.end(),
             "expected too many scalar args");
         obj = py::reinterpret_borrow<py::object>(
             py::handle((scalar_it++)->get()));
       } else if (arg_type == 'd') {
-        AT_CHECK(node_it != inputs.end(), "expected too many inputs");
+        TORCH_CHECK(node_it != inputs.end(), "expected too many inputs");
         obj = py::cast(envFn(*node_it++));
       } else {
         throw std::runtime_error("unexpected calling convention");
@@ -331,6 +347,9 @@ void BlockToONNX(
     // Call the symbolic function
     // Use a little trampoline function so we can give good error messages
     // upon argument mismatch
+    py::object opset_version = onnx_symbolic.attr("_export_onnx_opset_version");
+    onnx_registry.attr("register_op")(
+        op->name(), pyobj.attr("symbolic"), "", opset_version);
     py::object raw_output = onnx.attr("_run_symbolic_method")(
         op->name(), pyobj.attr("symbolic"), py_symbolic_args);
 
@@ -340,7 +359,7 @@ void BlockToONNX(
   // Finally, visit all nodes in the graph
   for (auto node : old_block->nodes()) {
     if (node->kind().is_caffe2()) {
-      // Pass on Caffe2 opeartor, since we already preprocess it
+      // Pass on Caffe2 operator, since we already preprocess it
       cloneNode(node);
     } else if (node->kind() == prim::PythonOp) {
       callPySymbolicMethod(static_cast<ConcretePythonOp*>(node));
@@ -350,10 +369,11 @@ void BlockToONNX(
   }
   for (auto output : old_block->outputs()) {
     ctx.block->registerOutput(env.at(output));
-    env.at(output)->setType(output->type());
   }
-
-  EliminateDeadCode(ctx.block);
+  EliminateDeadCode(
+      ctx.block,
+      true,
+      DCESideEffectPolicy::ALLOW_DELETING_NODES_WITH_SIDE_EFFECTS);
 }
 
 } // namespace jit

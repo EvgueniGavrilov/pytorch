@@ -1,5 +1,3 @@
-#define __STDC_FORMAT_MACROS
-
 #include <torch/csrc/python_headers.h>
 #ifdef _MSC_VER
 #include <Windows.h>
@@ -20,14 +18,25 @@
 #include <torch/csrc/Device.h>
 #include <torch/csrc/autograd/utils/wrap_outputs.h>
 
+#include <fmt/format.h>
+
 #include <torch/csrc/generic/Storage.cpp>
 #include <TH/THGenerateAllTypes.h>
+
+#include <torch/csrc/generic/Storage.cpp>
+#include <TH/THGenerateComplexTypes.h>
 
 #include <torch/csrc/generic/Storage.cpp>
 #include <TH/THGenerateHalfType.h>
 
 #include <torch/csrc/generic/Storage.cpp>
 #include <TH/THGenerateBoolType.h>
+
+#include <torch/csrc/generic/Storage.cpp>
+#include <TH/THGenerateBFloat16Type.h>
+
+#include <torch/csrc/generic/Storage.cpp>
+#include <TH/THGenerateQTypes.h>
 
 template<>
 void THPPointer<THStorage>::free() {

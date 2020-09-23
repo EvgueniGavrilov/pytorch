@@ -47,12 +47,13 @@ class LowRankMultivariateNormal(Distribution):
     r"""
     Creates a multivariate normal distribution with covariance matrix having a low-rank form
     parameterized by :attr:`cov_factor` and :attr:`cov_diag`::
+
         covariance_matrix = cov_factor @ cov_factor.T + cov_diag
 
     Example:
 
-        >>> m = LowRankMultivariateNormal(torch.zeros(2), torch.tensor([1, 0]), torch.tensor([1, 1]))
-        >>> m.sample()  # normally distributed with mean=`[0,0]`, cov_factor=`[1,0]`, cov_diag=`[1,1]`
+        >>> m = LowRankMultivariateNormal(torch.zeros(2), torch.tensor([[1.], [0.]]), torch.ones(2))
+        >>> m.sample()  # normally distributed with mean=`[0,0]`, cov_factor=`[[1],[0]]`, cov_diag=`[1,1]`
         tensor([-0.2102, -0.5429])
 
     Args:
@@ -69,6 +70,7 @@ class LowRankMultivariateNormal(Distribution):
         `matrix determinant lemma <https://en.wikipedia.org/wiki/Matrix_determinant_lemma>`_.
         Thanks to these formulas, we just need to compute the determinant and inverse of
         the small size "capacitance" matrix::
+
             capacitance = I + cov_factor.T @ inv(cov_diag) @ cov_factor
     """
     arg_constraints = {"loc": constraints.real,
@@ -94,9 +96,9 @@ class LowRankMultivariateNormal(Distribution):
         cov_diag_ = cov_diag.unsqueeze(-1)
         try:
             loc_, self.cov_factor, cov_diag_ = torch.broadcast_tensors(loc_, cov_factor, cov_diag_)
-        except RuntimeError:
+        except RuntimeError as e:
             raise ValueError("Incompatible batch shapes: loc {}, cov_factor {}, cov_diag {}"
-                             .format(loc.shape, cov_factor.shape, cov_diag.shape))
+                             .format(loc.shape, cov_factor.shape, cov_diag.shape)) from e
         self.loc = loc_[..., 0]
         self.cov_diag = cov_diag_[..., 0]
         batch_shape = self.loc.shape[:-1]

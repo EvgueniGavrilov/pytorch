@@ -8,20 +8,33 @@ torch.Tensor
 A :class:`torch.Tensor` is a multi-dimensional matrix containing elements of
 a single data type.
 
-Torch defines eight CPU tensor types and eight GPU tensor types:
+Torch defines 10 tensor types with CPU and GPU variants:
 
-========================   ===========================================   ===========================   ================================
+========================== ===========================================   ============================= ================================
 Data type                  dtype                                         CPU tensor                    GPU tensor
-========================   ===========================================   ===========================   ================================
+========================== ===========================================   ============================= ================================
 32-bit floating point      ``torch.float32`` or ``torch.float``          :class:`torch.FloatTensor`    :class:`torch.cuda.FloatTensor`
 64-bit floating point      ``torch.float64`` or ``torch.double``         :class:`torch.DoubleTensor`   :class:`torch.cuda.DoubleTensor`
-16-bit floating point      ``torch.float16`` or ``torch.half``           :class:`torch.HalfTensor`     :class:`torch.cuda.HalfTensor`
+16-bit floating point [1]_ ``torch.float16`` or ``torch.half``           :class:`torch.HalfTensor`     :class:`torch.cuda.HalfTensor`
+16-bit floating point [2]_ ``torch.bfloat16``                            :class:`torch.BFloat16Tensor` :class:`torch.cuda.BFloat16Tensor`
+32-bit complex             ``torch.complex32``
+64-bit complex             ``torch.complex64``
+128-bit complex            ``torch.complex128`` or ``torch.cdouble``
 8-bit integer (unsigned)   ``torch.uint8``                               :class:`torch.ByteTensor`     :class:`torch.cuda.ByteTensor`
 8-bit integer (signed)     ``torch.int8``                                :class:`torch.CharTensor`     :class:`torch.cuda.CharTensor`
 16-bit integer (signed)    ``torch.int16`` or ``torch.short``            :class:`torch.ShortTensor`    :class:`torch.cuda.ShortTensor`
 32-bit integer (signed)    ``torch.int32`` or ``torch.int``              :class:`torch.IntTensor`      :class:`torch.cuda.IntTensor`
 64-bit integer (signed)    ``torch.int64`` or ``torch.long``             :class:`torch.LongTensor`     :class:`torch.cuda.LongTensor`
-========================   ===========================================   ===========================   ================================
+Boolean                    ``torch.bool``                                :class:`torch.BoolTensor`     :class:`torch.cuda.BoolTensor`
+========================== ===========================================   ============================= ================================
+
+.. [1]
+  Sometimes referred to as binary16: uses 1 sign, 5 exponent, and 10
+  significand bits. Useful when precision is important at the expense of range.
+.. [2]
+  Sometimes referred to as Brain Floating Point: use 1 sign, 8 exponent and 7
+  significand bits. Useful when range is important, since it has the same
+  number of exponent bits as ``float32``
 
 :class:`torch.Tensor` is an alias for the default tensor type (:class:`torch.FloatTensor`).
 
@@ -102,8 +115,11 @@ A tensor can be created with :attr:`requires_grad=True` so that
             [ 2.0000,  2.0000]])
 
 Each tensor has an associated :class:`torch.Storage`, which holds its data.
-The tensor class provides multi-dimensional, `strided <https://en.wikipedia.org/wiki/Stride_of_an_array>`_
+The tensor class also provides multi-dimensional, `strided <https://en.wikipedia.org/wiki/Stride_of_an_array>`_
 view of a storage and defines numeric operations on it.
+
+.. note::
+   For more information on tensor views, see :ref:`tensor-view-doc`.
 
 .. note::
    For more information on the :class:`torch.dtype`, :class:`torch.device`, and
@@ -119,6 +135,11 @@ view of a storage and defines numeric operations on it.
 .. note::
     To change an existing tensor's :class:`torch.device` and/or :class:`torch.dtype`, consider using
     :meth:`~torch.Tensor.to` method on the tensor.
+
+.. warning::
+   Current implementation of :class:`torch.Tensor` introduces memory overhead,
+   thus it might lead to unexpectedly high memory usage in the applications with many tiny tensors.
+   If this is your case, consider using one large structure.
 
 .. class:: Tensor()
 
@@ -140,13 +161,24 @@ view of a storage and defines numeric operations on it.
    .. automethod:: new_zeros
 
    .. autoattribute:: is_cuda
+   .. autoattribute:: is_quantized
+   .. autoattribute:: is_meta
    .. autoattribute:: device
    .. autoattribute:: grad
+      :noindex:
+   .. autoattribute:: ndim
+   .. autoattribute:: T
+   .. autoattribute:: real
+   .. autoattribute:: imag
 
    .. automethod:: abs
    .. automethod:: abs_
+   .. automethod:: absolute
+   .. automethod:: absolute_
    .. automethod:: acos
    .. automethod:: acos_
+   .. automethod:: arccos
+   .. automethod:: arccos_
    .. automethod:: add
    .. automethod:: add_
    .. automethod:: addbmm
@@ -162,28 +194,43 @@ view of a storage and defines numeric operations on it.
    .. automethod:: addr
    .. automethod:: addr_
    .. automethod:: allclose
+   .. automethod:: amax
+   .. automethod:: amin
+   .. automethod:: angle
    .. automethod:: apply_
    .. automethod:: argmax
    .. automethod:: argmin
    .. automethod:: argsort
    .. automethod:: asin
    .. automethod:: asin_
+   .. automethod:: arcsin
+   .. automethod:: arcsin_
+   .. automethod:: as_strided
    .. automethod:: atan
+   .. automethod:: atan_
+   .. automethod:: arctan
+   .. automethod:: arctan_
    .. automethod:: atan2
    .. automethod:: atan2_
-   .. automethod:: atan_
    .. automethod:: backward
+      :noindex:
    .. automethod:: baddbmm
    .. automethod:: baddbmm_
    .. automethod:: bernoulli
    .. automethod:: bernoulli_
+   .. automethod:: bfloat16
    .. automethod:: bincount
+   .. automethod:: bitwise_not
+   .. automethod:: bitwise_not_
+   .. automethod:: bitwise_and
+   .. automethod:: bitwise_and_
+   .. automethod:: bitwise_or
+   .. automethod:: bitwise_or_
+   .. automethod:: bitwise_xor
+   .. automethod:: bitwise_xor_
    .. automethod:: bmm
    .. automethod:: bool
    .. automethod:: byte
-   .. automethod:: btrifact
-   .. automethod:: btrifact_with_info
-   .. automethod:: btrisolve
    .. automethod:: cauchy_
    .. automethod:: ceil
    .. automethod:: ceil_
@@ -194,34 +241,51 @@ view of a storage and defines numeric operations on it.
    .. automethod:: chunk
    .. automethod:: clamp
    .. automethod:: clamp_
+   .. automethod:: clip
+   .. automethod:: clip_
    .. automethod:: clone
    .. automethod:: contiguous
    .. automethod:: copy_
+   .. automethod:: conj
    .. automethod:: cos
    .. automethod:: cos_
    .. automethod:: cosh
    .. automethod:: cosh_
+   .. automethod:: count_nonzero
+   .. automethod:: acosh
+   .. automethod:: acosh_
+   .. automethod:: arccosh
+   .. automethod:: arccosh_
    .. automethod:: cpu
    .. automethod:: cross
    .. automethod:: cuda
+   .. automethod:: logcumsumexp
+   .. automethod:: cummax
+   .. automethod:: cummin
    .. automethod:: cumprod
    .. automethod:: cumsum
    .. automethod:: data_ptr
+   .. automethod:: deg2rad
    .. automethod:: dequantize
    .. automethod:: det
    .. automethod:: dense_dim
    .. automethod:: detach
+      :noindex:
    .. automethod:: detach_
+      :noindex:
    .. automethod:: diag
    .. automethod:: diag_embed
    .. automethod:: diagflat
    .. automethod:: diagonal
+   .. automethod:: fill_diagonal_
    .. automethod:: digamma
    .. automethod:: digamma_
    .. automethod:: dim
    .. automethod:: dist
    .. automethod:: div
    .. automethod:: div_
+   .. automethod:: divide
+   .. automethod:: divide_
    .. automethod:: dot
    .. automethod:: double
    .. automethod:: eig
@@ -242,31 +306,46 @@ view of a storage and defines numeric operations on it.
    .. automethod:: expand
    .. automethod:: expand_as
    .. automethod:: exponential_
+   .. automethod:: fix
+   .. automethod:: fix_
    .. automethod:: fft
    .. automethod:: fill_
    .. automethod:: flatten
    .. automethod:: flip
+   .. automethod:: fliplr
+   .. automethod:: flipud
    .. automethod:: float
    .. automethod:: floor
    .. automethod:: floor_
+   .. automethod:: floor_divide
+   .. automethod:: floor_divide_
    .. automethod:: fmod
    .. automethod:: fmod_
    .. automethod:: frac
    .. automethod:: frac_
    .. automethod:: gather
+   .. automethod:: gcd
+   .. automethod:: gcd_
    .. automethod:: ge
    .. automethod:: ge_
-   .. automethod:: gels
+   .. automethod:: greater_equal
+   .. automethod:: greater_equal_
    .. automethod:: geometric_
    .. automethod:: geqrf
    .. automethod:: ger
-   .. automethod:: gesv
    .. automethod:: get_device
    .. automethod:: gt
    .. automethod:: gt_
+   .. automethod:: greater
+   .. automethod:: greater_
    .. automethod:: half
    .. automethod:: hardshrink
+   .. automethod:: heaviside
    .. automethod:: histc
+   .. automethod:: hypot
+   .. automethod:: hypot_
+   .. automethod:: i0
+   .. automethod:: i0_
    .. automethod:: ifft
    .. automethod:: index_add_
    .. automethod:: index_add
@@ -282,20 +361,36 @@ view of a storage and defines numeric operations on it.
    .. automethod:: int_repr
    .. automethod:: inverse
    .. automethod:: irfft
+   .. automethod:: isclose
+   .. automethod:: isfinite
+   .. automethod:: isinf
+   .. automethod:: isposinf
+   .. automethod:: isneginf
+   .. automethod:: isnan
    .. automethod:: is_contiguous
+   .. automethod:: is_complex
    .. automethod:: is_floating_point
-   .. automethod:: is_leaf
+   .. autoattribute:: is_leaf
+      :noindex:
    .. automethod:: is_pinned
    .. automethod:: is_set_to
    .. automethod:: is_shared
    .. automethod:: is_signed
-   .. automethod:: is_sparse
+   .. autoattribute:: is_sparse
+   .. automethod:: istft
+   .. automethod:: isreal
    .. automethod:: item
    .. automethod:: kthvalue
+   .. automethod:: lcm
+   .. automethod:: lcm_
    .. automethod:: le
    .. automethod:: le_
+   .. automethod:: less_equal
+   .. automethod:: less_equal_
    .. automethod:: lerp
    .. automethod:: lerp_
+   .. automethod:: lgamma
+   .. automethod:: lgamma_
    .. automethod:: log
    .. automethod:: log_
    .. automethod:: logdet
@@ -306,12 +401,28 @@ view of a storage and defines numeric operations on it.
    .. automethod:: log2
    .. automethod:: log2_
    .. automethod:: log_normal_
+   .. automethod:: logaddexp
+   .. automethod:: logaddexp2
    .. automethod:: logsumexp
+   .. automethod:: logical_and
+   .. automethod:: logical_and_
+   .. automethod:: logical_not
+   .. automethod:: logical_not_
+   .. automethod:: logical_or
+   .. automethod:: logical_or_
+   .. automethod:: logical_xor
+   .. automethod:: logical_xor_
+   .. automethod:: logit
+   .. automethod:: logit_
    .. automethod:: long
+   .. automethod:: lstsq
    .. automethod:: lt
    .. automethod:: lt_
+   .. automethod:: less
+   .. automethod:: less_
    .. automethod:: lu
    .. automethod:: lu_solve
+   .. automethod:: as_subclass
    .. automethod:: map_
    .. automethod:: masked_scatter_
    .. automethod:: masked_scatter
@@ -320,26 +431,39 @@ view of a storage and defines numeric operations on it.
    .. automethod:: masked_select
    .. automethod:: matmul
    .. automethod:: matrix_power
+   .. automethod:: matrix_exp
    .. automethod:: max
+   .. automethod:: maximum
    .. automethod:: mean
    .. automethod:: median
    .. automethod:: min
+   .. automethod:: minimum
    .. automethod:: mm
    .. automethod:: mode
+   .. automethod:: movedim
    .. automethod:: mul
    .. automethod:: mul_
+   .. automethod:: multiply
+   .. automethod:: multiply_
    .. automethod:: multinomial
    .. automethod:: mv
    .. automethod:: mvlgamma
    .. automethod:: mvlgamma_
+   .. automethod:: nansum
    .. automethod:: narrow
    .. automethod:: narrow_copy
    .. automethod:: ndimension
    .. automethod:: ne
    .. automethod:: ne_
+   .. automethod:: not_equal
+   .. automethod:: not_equal_
    .. automethod:: neg
    .. automethod:: neg_
+   .. automethod:: negative
+   .. automethod:: negative_
    .. automethod:: nelement
+   .. automethod:: nextafter
+   .. automethod:: nextafter_
    .. automethod:: nonzero
    .. automethod:: norm
    .. automethod:: normal_
@@ -347,38 +471,47 @@ view of a storage and defines numeric operations on it.
    .. automethod:: numpy
    .. automethod:: orgqr
    .. automethod:: ormqr
+   .. automethod:: outer
    .. automethod:: permute
    .. automethod:: pin_memory
    .. automethod:: pinverse
-   .. automethod:: potrf
-   .. automethod:: potri
-   .. automethod:: potrs
+   .. automethod:: polygamma
+   .. automethod:: polygamma_
    .. automethod:: pow
    .. automethod:: pow_
    .. automethod:: prod
-   .. automethod:: pstrf
    .. automethod:: put_
    .. automethod:: qr
-   .. automethod:: quantize_linear
+   .. automethod:: qscheme
+   .. automethod:: quantile
+   .. automethod:: nanquantile
    .. automethod:: q_scale
    .. automethod:: q_zero_point
+   .. automethod:: q_per_channel_scales
+   .. automethod:: q_per_channel_zero_points
+   .. automethod:: q_per_channel_axis
+   .. automethod:: rad2deg
    .. automethod:: random_
    .. automethod:: reciprocal
    .. automethod:: reciprocal_
+   .. automethod:: record_stream
    .. automethod:: register_hook
+      :noindex:
    .. automethod:: remainder
    .. automethod:: remainder_
    .. automethod:: renorm
    .. automethod:: renorm_
    .. automethod:: repeat
    .. automethod:: repeat_interleave
-   .. automethod:: requires_grad
+   .. autoattribute:: requires_grad
+      :noindex:
    .. automethod:: requires_grad_
    .. automethod:: reshape
    .. automethod:: reshape_as
    .. automethod:: resize_
    .. automethod:: resize_as_
    .. automethod:: retain_grad
+      :noindex:
    .. automethod:: rfft
    .. automethod:: roll
    .. automethod:: rot90
@@ -398,10 +531,17 @@ view of a storage and defines numeric operations on it.
    .. automethod:: sigmoid_
    .. automethod:: sign
    .. automethod:: sign_
+   .. automethod:: signbit
+   .. automethod:: sgn
+   .. automethod:: sgn_
    .. automethod:: sin
    .. automethod:: sin_
    .. automethod:: sinh
    .. automethod:: sinh_
+   .. automethod:: asinh
+   .. automethod:: asinh_
+   .. automethod:: arcsinh
+   .. automethod:: arcsinh_
    .. automethod:: size
    .. automethod:: slogdet
    .. automethod:: solve
@@ -411,6 +551,8 @@ view of a storage and defines numeric operations on it.
    .. automethod:: sparse_dim
    .. automethod:: sqrt
    .. automethod:: sqrt_
+   .. automethod:: square
+   .. automethod:: square_
    .. automethod:: squeeze
    .. automethod:: squeeze_
    .. automethod:: std
@@ -421,6 +563,8 @@ view of a storage and defines numeric operations on it.
    .. automethod:: stride
    .. automethod:: sub
    .. automethod:: sub_
+   .. automethod:: subtract
+   .. automethod:: subtract_
    .. automethod:: sum
    .. automethod:: sum_to_size
    .. automethod:: svd
@@ -434,6 +578,10 @@ view of a storage and defines numeric operations on it.
    .. automethod:: tan_
    .. automethod:: tanh
    .. automethod:: tanh_
+   .. automethod:: atanh
+   .. automethod:: atanh_
+   .. automethod:: arctanh
+   .. automethod:: arctanh_
    .. automethod:: tolist
    .. automethod:: topk
    .. automethod:: to_sparse
@@ -445,7 +593,8 @@ view of a storage and defines numeric operations on it.
    .. automethod:: tril_
    .. automethod:: triu
    .. automethod:: triu_
-   .. automethod:: trtrs
+   .. automethod:: true_divide
+   .. automethod:: true_divide_
    .. automethod:: trunc
    .. automethod:: trunc_
    .. automethod:: type
@@ -459,14 +608,15 @@ view of a storage and defines numeric operations on it.
    .. automethod:: unsqueeze_
    .. automethod:: values
    .. automethod:: var
+   .. automethod:: vdot
    .. automethod:: view
    .. automethod:: view_as
    .. automethod:: where
    .. automethod:: zero_
 
-.. class:: ByteTensor()
+.. class:: BoolTensor()
 
-   The following methods are unique to :class:`torch.ByteTensor`.
+   The following methods are unique to :class:`torch.BoolTensor`.
 
    .. automethod:: all
    .. automethod:: any

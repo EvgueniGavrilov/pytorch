@@ -4,11 +4,10 @@
 #define BOX_WITH_NMS_AND_LIMIT_OP_H_
 
 #include "caffe2/core/context.h"
+#include "caffe2/core/export_caffe2_op_to_c10.h"
 #include "caffe2/core/operator.h"
-#include "caffe2/core/c10_operator.h"
 
-
-C10_DECLARE_CAFFE2_OPERATOR(BoxWithNMSLimit)
+C10_DECLARE_EXPORT_CAFFE2_OP_TO_C10(BoxWithNMSLimit)
 
 namespace caffe2 {
 
@@ -44,13 +43,15 @@ class BoxWithNMSLimitOp final : public Operator<Context> {
             true)),
         output_classes_include_bg_cls_(this->template GetSingleArgument<bool>(
             "output_classes_include_bg_cls",
-            true)) {
+            true)),
+        legacy_plus_one_(
+            this->template GetSingleArgument<bool>("legacy_plus_one", true)) {
     CAFFE_ENFORCE(
         soft_nms_method_str_ == "linear" || soft_nms_method_str_ == "gaussian",
         "Unexpected soft_nms_method");
     soft_nms_method_ = (soft_nms_method_str_ == "linear") ? 1 : 2;
 
-    // When input `boxes` doesn't inlcude background class, the score will skip
+    // When input `boxes` doesn't include background class, the score will skip
     // background class and start with foreground classes directly, and put the
     // background class in the end, i.e. score[:, 0:NUM_CLASSES-1] represents
     // foreground classes and score[:,NUM_CLASSES] represents background class.
@@ -91,6 +92,8 @@ class BoxWithNMSLimitOp final : public Operator<Context> {
   // The index where foreground starts in scoures. Eg. if 0 represents
   // background class then foreground class starts with 1.
   int input_scores_fg_cls_starting_id_{1};
+  // The infamous "+ 1" for box width and height dating back to the DPM days
+  bool legacy_plus_one_{true};
 
   // Map a class id (starting with background and then foreground) from (0, 1,
   // ..., NUM_FG_CLASSES) to it's matching value in box

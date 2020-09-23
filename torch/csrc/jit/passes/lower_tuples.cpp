@@ -1,6 +1,7 @@
 #include <torch/csrc/jit/passes/lower_tuples.h>
 #include <ATen/core/functional.h>
 #include <c10/util/Exception.h>
+#include <torch/csrc/jit/ir/constants.h>
 #include <torch/csrc/jit/passes/dead_code_elimination.h>
 
 namespace torch {
@@ -11,7 +12,7 @@ namespace {
 // operators where we expect to find tuples as inputs/outputs
 // this is to assert we are only doing modifications when we know
 // we can flatten tuples
-std::unordered_set<Symbol> white_list = {
+std::unordered_set<Symbol> supported_ops = {
     prim::If,
     prim::Loop,
     prim::TupleUnpack,
@@ -20,6 +21,8 @@ std::unordered_set<Symbol> white_list = {
     prim::TupleSlice,
     prim::Param,
     prim::Return,
+    prim::PythonOp,
+    aten::format,
 };
 
 void removeTupleNodes(Node* n, bool must_remove_tuples) {
@@ -27,7 +30,8 @@ void removeTupleNodes(Node* n, bool must_remove_tuples) {
       n->kind() != prim::TupleSlice) {
     return;
   }
-  auto construct = n->input()->node();
+  // tuple index has two inputs, tuple and index
+  auto construct = n->inputs().at(0)->node();
   if (construct->kind() != prim::TupleConstruct) {
     if (must_remove_tuples) {
       AT_ERROR(n->kind().toQualString(), " not matched to tuple construct");
@@ -39,8 +43,24 @@ void removeTupleNodes(Node* n, bool must_remove_tuples) {
       n->outputs()[i]->replaceAllUsesWith(construct->inputs().at(i));
     }
   } else if (n->kind() == prim::TupleIndex) {
-    auto idx = n->i(attr::index);
-    n->output()->replaceAllUsesWith(construct->inputs().at(idx));
+    auto idx = n->inputs().at(1);
+    auto maybe_int = constant_as<int64_t>(idx);
+    if (!maybe_int) {
+      if (must_remove_tuples) {
+        AT_ERROR(n->sourceRange(), "tuple index with non-constant index");
+      }
+      return;
+    }
+    auto int_idx = *maybe_int;
+    auto len = construct->output()->type()->containedTypes().size();
+    if (int_idx < 0) {
+      int_idx += len;
+    }
+    // currently, we allow non-constant tuple index if the tuple is of one type.
+    // so we need to check bounds here
+    if (int_idx >= 0 && static_cast<size_t>(int_idx) < len) {
+      n->output()->replaceAllUsesWith(construct->inputs().at(int_idx));
+    }
   } else if (n->kind() == prim::TupleSlice) {
     std::vector<Value*> values;
     int64_t beg = n->i(attr::beg);
@@ -55,10 +75,36 @@ void removeTupleNodes(Node* n, bool must_remove_tuples) {
     n->output()->replaceAllUsesWith(tuple_out->output());
   }
 }
-
 } // anonymous namespace
 
 static void LowerAllTuples(Block* block);
+
+static void RemoveTupleConstants(Node* n) {
+  if (!(n->kind() == prim::Constant &&
+        n->output()->type()->cast<TupleType>())) {
+    return;
+  }
+
+  auto g = n->owningGraph();
+  auto tuple_elements = toIValue(n->output()).value().toTuple()->elements();
+  WithInsertPoint insert(n);
+  std::vector<Value*> elements;
+  for (const auto& elem : tuple_elements) {
+    auto constant = insertConstant(*n->owningGraph(), elem);
+    elements.push_back(constant);
+  }
+  auto tuple_type = n->output()->type()->expect<TupleType>();
+  auto tuple_construct = g->insertNode(n->owningGraph()->createTuple(
+      elements, tuple_type->schema() ? tuple_type : nullptr));
+
+  // insert the tuple first before recursing on its elements, so that its
+  // elements will have a use
+  for (Value* elem : elements) {
+    RemoveTupleConstants(elem->node());
+  }
+
+  n->replaceAllUsesWith(tuple_construct);
+}
 
 static void VisitNode(Node* n, Node* insert_point) {
   auto& graph = *n->owningGraph();
@@ -83,10 +129,12 @@ static void VisitNode(Node* n, Node* insert_point) {
   for (size_t i = 0; i < n->inputs().size();) {
     auto input = n->inputs()[i];
     if (TupleTypePtr tt = input->type()->cast<TupleType>()) {
-      AT_CHECK(
-          white_list.count(n->kind()) > 0,
-          "tuple appears in op that does not forward tuples");
-      AT_CHECK(
+      TORCH_CHECK(
+          supported_ops.count(n->kind()) > 0,
+          "tuple appears in op that does not forward tuples, ",
+          "unsupported kind: ",
+          n->kind().toQualString());
+      TORCH_CHECK(
           input->node()->kind() == prim::TupleConstruct,
           "tuple use not matched to tuple construct");
       for (size_t j = 0; j < tt->elements().size(); ++j) {
@@ -107,14 +155,20 @@ static void VisitNode(Node* n, Node* insert_point) {
   // flatten the outputs list
   for (size_t i = 0; i < n->outputs().size();) {
     Value* output = n->outputs()[i];
+    if (!output->hasUses()) {
+      return;
+    }
+
     // (a, b, tup, c) -> (a, b, t0, t1, c)
     // and:
     //    tup = (t0, t1)
     // is placed at the current insertion point
     if (TupleTypePtr tt = output->type()->cast<TupleType>()) {
-      AT_CHECK(
-          white_list.count(n->kind()) > 0,
-          "tuple appears in op that does not forward tuples");
+      TORCH_CHECK(
+          supported_ops.count(n->kind()) > 0,
+          "tuple appears in op that does not forward tuples, ",
+          "unsupported kind: ",
+          n->kind().toQualString());
       for (size_t j = 0; j < tt->elements().size(); j++) {
         n->insertOutput(i + 1 + j)->setType(tt->elements()[j]);
       }
@@ -139,6 +193,7 @@ static void LowerAllTuples(Block* block) {
   for (auto it = block->nodes().begin(), end = block->nodes().end();
        it != end;) {
     auto n = *it++;
+    RemoveTupleConstants(n);
     VisitNode(n, *it);
   }
   // tuples in return lists of blocks behave exactly the same as
@@ -150,7 +205,7 @@ static void LowerAllTuples(Block* block) {
 
 static void EnsureNoTuples(ArrayRef<Value*> values) {
   for (Value* v : values) {
-    AT_CHECK(
+    TORCH_CHECK(
         v->type()->kind() != TypeKind::TupleType, "Couldn't lower all tuples.");
   }
 }
@@ -164,7 +219,7 @@ static void EnsureNoTuples(Block* block) {
   }
 }
 
-void LowerAllTuples(std::shared_ptr<Graph>& graph) {
+void LowerAllTuples(const std::shared_ptr<Graph>& graph) {
   LowerAllTuples(graph->block());
   EliminateDeadCode(graph->block());
   EnsureNoTuples(graph->block());
@@ -179,10 +234,9 @@ void LowerSimpleTuples(Block* block) {
   }
 }
 
-void LowerSimpleTuples(std::shared_ptr<Graph>& graph) {
+void LowerSimpleTuples(const std::shared_ptr<Graph>& graph) {
   LowerSimpleTuples(graph->block());
   EliminateDeadCode(graph);
 }
-
 } // namespace jit
 } // namespace torch

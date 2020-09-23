@@ -47,8 +47,15 @@ vector<TensorShape> TensorInferenceForSplit(
   auto split = helper.GetRepeatedArgument<int>("split");
   // Equally split the input into outputs
   const int output_size = def.output_size();
-  if (split.empty()) {
-    if (!input_channels % output_size) {
+  if (def.input_size() == caffe2::SplitOp<CPUContext>::kSplitOpInputSize) {
+    if (!split.empty()) {
+      LOG(WARNING) << "If you set split with an input blob, do not pass in "
+                      "split in the argument.";
+    }
+    // We cannot infer output shape until we see the value of split input
+    return ret_invalid_shape();
+  } else if (split.empty()) {
+    if (input_channels % output_size != 0) {
       LOG(WARNING) << "Input channels (" << input_channels
                    << ") should be divisible by number of outputs ("
                    << output_size << ")";
@@ -165,6 +172,10 @@ OPERATOR_SCHEMA(SplitByLengths)
     .Input(1, "legnths", "The tensor `l_i` indicates the logic block of input.")
     .Arg("axis", "Which axis to split on")
     .Arg("order", "Either NHWC or NCWH, will split on C axis, defaults to NCHW")
+    .Arg(
+        "use_scaling_lengths",
+        "(*bool*): Enables automatic scaling of the lengths values. When enabled "
+        "will automatically find a value K >= 1, such that sum(lengths) * K == len(input).")
     .DeviceInferenceFunction([](const OperatorDef& def) {
       auto op_device =
           def.has_device_option() ? def.device_option() : DeviceOption();
@@ -178,7 +189,89 @@ OPERATOR_SCHEMA(SplitByLengths)
 Split a tensor into a list of tensors, given a lengths input, along the specified
 'axis'. If `K` outputs are provided, the op assumes `len(lengths) % K == 0`.
 The `input` will be split into `K` parts. Each part of length
-`sum(lengths[i*k:i*k+k))`)DOC");
+`sum(lengths[i*k:i*k+k))`
+
+<details>
+
+<summary> <b>Example 1</b> </summary>
+
+**Code**
+
+```
+
+workspace.ResetWorkspace()
+
+op = core.CreateOperator(
+    "SplitByLengths",
+    ["input", "lengths"],
+    ["output_0","output_1","output_2"],
+    axis=0
+)
+
+workspace.FeedBlob("input", np.random.randint(10, size=(9)))
+workspace.FeedBlob("lengths", np.array([3,2,4], dtype=np.int32))
+print("input:", workspace.FetchBlob("input"))
+print("lengths:", workspace.FetchBlob("lengths"))
+workspace.RunOperatorOnce(op)
+print("output_0:", workspace.FetchBlob("output_0"))
+print("output_1:", workspace.FetchBlob("output_1"))
+print("output_2:", workspace.FetchBlob("output_2"))
+
+```
+
+**Result**
+
+```
+
+input: [2 2 6 6 6 0 5 7 4]
+lengths: [3 2 4]
+output_0: [2 2 6]
+output_1: [6 6]
+output_2: [0 5 7 4]
+
+```
+
+<summary> <b>Example 2</b> </summary>
+
+**Code**
+
+```
+
+workspace.ResetWorkspace()
+
+op = core.CreateOperator(
+    "SplitByLengths",
+    ["input", "lengths"],
+    ["output_0","output_1","output_2"],
+    axis=0,
+    use_scaling_lengths=true,
+)
+
+workspace.FeedBlob("input", np.random.randint(10, size=(9)))
+workspace.FeedBlob("lengths", np.array([1,1,1], dtype=np.int32))
+print("input:", workspace.FetchBlob("input"))
+print("lengths:", workspace.FetchBlob("lengths"))
+print("output_0:", workspace.FetchBlob("output_0"))
+print("output_1:", workspace.FetchBlob("output_1"))
+print("output_2:", workspace.FetchBlob("output_2"))
+
+```
+
+**Result**
+
+```
+
+input: [2 2 6 6 6 0 5 7 4]
+lengths: [1 1 1]
+output_0: [2 2 6]
+output_1: [6 6 6]
+output_2: [5 7 4]
+
+```
+
+</details>
+
+)DOC");
 
 OpSchema::Cost CostInferenceForConcat(
     const OperatorDef& def,
@@ -189,13 +282,15 @@ OpSchema::Cost CostInferenceForConcat(
       : GetDimFromOrderString(
             helper.GetSingleArgument<string>("order", "NCHW"));
   bool add_axis = helper.GetSingleArgument<int>("add_axis", 0) != 0;
-  const int canonical_axis = canonical_axis_index_(axis, in[0].dims_size());
+  int adj_size = in[0].dims_size() + (add_axis ? 1 : 0);
+  const int canonical_axis = canonical_axis_index_(axis, adj_size);
+  CAFFE_ENFORCE_LT(canonical_axis, adj_size, "Axis not in input ndim range.");
   CAFFE_ENFORCE_GT(in.size(), 0);
   vector<int> out_shape(in[0].dims().begin(), in[0].dims().end());
   if (add_axis) {
     out_shape.insert(out_shape.begin() + canonical_axis, in.size());
   } else {
-    for (int i = 1; i < in.size(); ++i) {
+    for (size_t i = 1; i < in.size(); ++i) {
       out_shape[canonical_axis] += in[i].dims(canonical_axis);
     }
   }
@@ -268,15 +363,16 @@ vector<TensorShape> TensorInferenceForConcat(
     out_shape.insert(out_shape.begin() + canonical_axis, in.size());
   } else {
     for (int i = 1; i < in.size(); ++i) {
-      CAFFE_ENFORCE_EQ(
-          in[0].dims().size(),
-          in[i].dims().size(),
+      CAFFE_ENFORCE(
+          in[0].dims_size() == in[i].dims_size() ||
+              (canonical_axis == in[0].dims_size() - 1 &&
+               in[0].dims_size() == in[i].dims_size() + 1),
           "All inputs of Concat should have same dims except "
           "canonical_axis dim that is equal to ",
           canonical_axis,
           "Got different sizes for inputs 0 and ",
           i);
-      for (int j = 0; j < in[0].dims().size(); ++j) {
+      for (int j = 0; j < in[0].dims_size(); ++j) {
         if (j == canonical_axis) {
           continue;
         }

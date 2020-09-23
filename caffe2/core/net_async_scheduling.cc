@@ -149,19 +149,7 @@ void AsyncSchedulingNet::schedule(int task_id, bool run_inline) noexcept {
 
       // In case of net's failure, make sure all pending tasks are finished
       if (!success_) {
-        // Simple logic to capture all pending tasks - check all tasks
-        // at the end of each task in case of net's failure
-        for (auto tid = 0; tid < tasksNum(); ++tid) {
-          if (event(tid).Query() == EventStatus::EVENT_SCHEDULED) {
-            // SetFinished may throw, e.g. when we call it on already finished
-            // event, and in some other cases (CUDA)
-            try {
-              event(tid).SetFinished("Cancelled");
-            } catch (const EnforceNotMet&) {
-              // ignore
-            }
-          }
-        }
+        CancelAndFinishAsyncTasks();
       }
 
       // finishRun may cause waiters to wake up and destroy the net,
@@ -280,10 +268,38 @@ bool AsyncSchedulingNet::RunAsync() {
   return true;
 }
 
-AsyncSchedulingNet::~AsyncSchedulingNet() {
-  Wait();
+void AsyncSchedulingNet::Cancel() {
+  success_ = false;
+  NetBase::Cancel();
+
+  CancelAndFinishAsyncTasks();
 }
 
-REGISTER_NET(async_scheduling, AsyncSchedulingNet);
+void AsyncSchedulingNet::CancelAndFinishAsyncTasks() {
+  for (auto tid = 0; tid < tasksNum(); ++tid) {
+    if (event(tid).Query() == EventStatus::EVENT_SCHEDULED) {
+      // SetFinished may throw, e.g. when we call it on already finished
+      // event, and in some other cases (CUDA)
+      try {
+        lastTaskOp(tid)->CancelAsyncCallback();
+
+        // throw and catch exception to preserve stack trace
+        try {
+          throw AsyncNetCancelled();
+        } catch (const AsyncNetCancelled& e) {
+          event(tid).SetFinishedWithException(e.what());
+        }
+      } catch (const EnforceNotMet&) {
+        // ignore
+      }
+    }
+  }
+}
+
+  AsyncSchedulingNet::~AsyncSchedulingNet() {
+    Wait();
+  }
+
+  REGISTER_NET(async_scheduling, AsyncSchedulingNet);
 
 } // namespace caffe2
